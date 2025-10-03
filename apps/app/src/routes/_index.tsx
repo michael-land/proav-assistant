@@ -34,7 +34,7 @@ export async function clientAction({ request }: Route.ClientActionArgs) {
 export default function Index({ actionData }: Route.ComponentProps) {
   return (
     <div>
-      <h1>Control Box V1</h1>
+      <h1>Control Box V1.0.0</h1>
       <button
         type="button"
         onClick={async () => {
