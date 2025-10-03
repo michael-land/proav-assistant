@@ -1,0 +1,19 @@
+{
+  "name": "api",
+  "type": "module",
+  "scripts": {
+    "dev": "PORT=3000 tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "1.19.5",
+    "hono": "4.9.9",
+    "ky": "1.11.0",
+    "change-case": "5.4.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.6.2",
+    "type-fest": "5.0.1"
+  }
+}

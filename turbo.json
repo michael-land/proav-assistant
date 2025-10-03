@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/turbo/schema.json",
+  "ui": "stream",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"],
+      "inputs": ["$TURBO_DEFAULT$", ".env*"]
+    },
+    "test": {
+      "outputs": []
+    },
+
+    "//#check": {},
+    "//#fix": {
+      "cache": false
+    },
+
+    "deploy": {
+      "outputs": []
+    },
+    "dev": {
+      "inputs": ["src/**"],
+      "outputs": ["dist/**"],
+      "dependsOn": ["^build"],
+      "cache": false
+    },
+    "clean": {
+      "cache": false
+    },
+    "codegen": {
+      "dependsOn": ["^codegen"]
+    }
+  },
+
+  "globalDependencies": ["tsconfig.json", "pnpm-lock.yaml"],
+  "globalEnv": ["NODE_ENV"]
+}

@@ -1,0 +1,25 @@
+{
+  "extends": ["//"],
+  "$schema": "../../node_modules/turbo/schema.json",
+  "tasks": {
+    "codegen": {
+      "inputs": ["src/**/*.gql", "../hasura/metadata/**", "codegen.ts"],
+      "outputs": ["src/hasura/sdk.ts", "src/hasura/schema.graphql"]
+    },
+    "dev": {
+      "persistent": true,
+      "interruptible": false
+    },
+    "build": {
+      "env": [
+        "VITE_CLERK_PUBLISHABLE_KEY",
+        "VITE_MERCHANT_API_URL",
+        "CLERK_SIGN_IN_URL",
+        "CLERK_SIGN_UP_URL",
+        "CLERK_SIGN_IN_FALLBACK_REDIRECT_URL",
+        "CLERK_SIGN_UP_FALLBACK_REDIRECT_URL"
+      ],
+      "outputs": ["build"]
+    }
+  }
+}

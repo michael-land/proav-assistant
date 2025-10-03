@@ -1,0 +1,47 @@
+{
+  "name": "proav-assistant",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "turbo build",
+    "clean": "turbo clean && rimraf .turbo node_modules pnpm-lock.yaml",
+    "codegen": "turbo codegen",
+    "dev": "turbo watch dev",
+    "check": "ultracite check",
+    "fix": "ultracite fix",
+    "prepare": "is-ci || is-docker || husky",
+    "test": "turbo test",
+    "db:push": "pnpm --filter @merchant/database exec prisma db push",
+    "db:migrate": " pnpm --filter @merchant/database exec prisma migrate dev",
+    "db:seed": " pnpm --filter @merchant/database exec prisma migrate seed"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "20.1.0",
+    "@commitlint/config-conventional": "20.0.0",
+    "@biomejs/biome": "2.2.5",
+    "@commitlint/lint": "20.0.0",
+    "is-ci": "4.1.0",
+    "is-docker": "4.0.0",
+    "@eslint/js": "9.36.0",
+    "@total-typescript/ts-reset": "0.6.1",
+    "@tsconfig/next": "2.0.3",
+    "@tsconfig/node20": "20.1.6",
+    "@tsconfig/strictest": "2.0.6",
+    "@tsconfig/vite-react": "7.0.1",
+    "dotenv-cli": "10.0.0",
+    "globals": "16.4.0",
+    "husky": "9.1.7",
+    "lint-staged": "16.2.3",
+    "rimraf": "6.0.1",
+    "tsx": "4.20.6",
+    "turbo": "2.5.8",
+    "typescript": "5.9.3",
+    "ultracite": "5.5.0"
+  },
+  "packageManager": "pnpm@10.18.0",
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,json,jsonc,css,scss,md,mdx}": [
+      "pnpm dlx ultracite fix"
+    ]
+  }
+}

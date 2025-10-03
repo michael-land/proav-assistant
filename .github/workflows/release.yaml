@@ -1,0 +1,170 @@
+name: Release
+on:
+    push:
+        branches:
+            - main
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "版本号 (默认: latest)"
+                required: false
+                default: "latest"
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+
+            - name: Setup Package Manager
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v5
+              with:
+                  cache: "pnpm"
+                  node-version-file: ".node-version"
+
+            - name: Install
+              run: pnpm install
+
+            - name: Build
+              run: pnpm build
+
+    extract-version:
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.version.outputs.version }}
+            force-build: ${{ steps.version.outputs.force-build }}
+        steps:
+            - name: Extract version
+              id: version
+              run: |
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+                      echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+                      echo "force-build=true" >> $GITHUB_OUTPUT
+                  elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+                      echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+                      echo "force-build=true" >> $GITHUB_OUTPUT
+                  else
+                      echo "version=latest" >> $GITHUB_OUTPUT
+                      echo "force-build=false" >> $GITHUB_OUTPUT
+                  fi
+
+    build-and-push:
+        needs: [test, extract-version]
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                service:
+                    - name: api
+                      dockerfile: apps/api/Dockerfile
+                      image: xiaoyutamu/proav-assistant-api
+                    - name: app
+                      dockerfile: apps/app/Dockerfile
+                      image: xiaoyutamu/proav-assistant-app
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+              with:
+                  fetch-depth: 2
+
+            - name: Setup Package Manager
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v5
+              with:
+                  cache: "pnpm"
+                  node-version-file: ".node-version"
+
+            - name: Install
+              run: pnpm install
+
+            - name: Check changes and decide
+              id: check
+              run: |
+                  FORCE_BUILD="${{ needs.extract-version.outputs.force-build }}"
+                  SERVICE_NAME="${{ matrix.service.name }}"
+
+                  # 如果是强制构建（标签或手动触发），直接构建
+                  if [[ "$FORCE_BUILD" == "true" ]]; then
+                      echo "should-build=true" >> $GITHUB_OUTPUT
+                      echo "🔨 强制构建 $SERVICE_NAME"
+                      exit 0
+                  fi
+
+                  # 否则检查是否有变更
+                  if npx turbo-ignore $SERVICE_NAME --task=build; then
+                      echo "should-build=false" >> $GITHUB_OUTPUT
+                      echo "⏭️ $SERVICE_NAME 无变更，跳过构建"
+                  else
+                      echo "should-build=true" >> $GITHUB_OUTPUT
+                      echo "🔨 $SERVICE_NAME 有变更，需要构建"
+                  fi
+
+            - name: Set up QEMU
+              if: steps.check.outputs.should-build == 'true'
+              uses: docker/setup-qemu-action@v3
+
+            - name: Set up Docker Buildx
+              if: steps.check.outputs.should-build == 'true'
+              uses: docker/setup-buildx-action@v3
+
+            - name: Login to Docker Hub
+              if: steps.check.outputs.should-build == 'true'
+              uses: docker/login-action@v3
+              with:
+                  username: ${{ vars.DOCKER_USERNAME }}
+                  password: ${{ secrets.DOCKER_PASSWORD }}
+
+            - name: Build and push ${{ matrix.service.name }}
+              if: steps.check.outputs.should-build == 'true'
+              uses: docker/build-push-action@v5
+              with:
+                  context: .
+                  file: ${{ matrix.service.dockerfile }}
+                  platforms: linux/arm64
+                  push: true
+                  tags: |
+                      docker.io/${{ matrix.service.image }}:${{ needs.extract-version.outputs.version }}
+                      docker.io/${{ matrix.service.image }}:latest
+
+            - name: Output result
+              id: result
+              run: |
+                  if [[ "${{ steps.check.outputs.should-build }}" == "true" ]]; then
+                      echo "status=built" >> $GITHUB_OUTPUT
+                  else
+                      echo "status=skipped" >> $GITHUB_OUTPUT
+                  fi
+
+    summary:
+        needs: [extract-version, build-and-push]
+        runs-on: ubuntu-latest
+        if: always()
+        steps:
+            - name: Generate summary
+              run: |
+                  echo "## 📦 发布摘要" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "**版本:** ${{ needs.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+
+                  # 注意：由于 matrix job 的限制，我们无法直接获取每个 matrix 的输出
+                  # 这里提供一个简化的摘要
+                  if [[ "${{ needs.extract-version.outputs.force-build }}" == "true" ]]; then
+                      echo "✅ **proav-assistant-api** - 已构建并推送" >> $GITHUB_STEP_SUMMARY
+                      echo "✅ **proav-assistant-app** - 已构建并推送" >> $GITHUB_STEP_SUMMARY
+                  else
+                      echo "🔍 **proav-assistant-api & proav-assistant-app** - 根据变更情况选择性构建" >> $GITHUB_STEP_SUMMARY
+                      echo "" >> $GITHUB_STEP_SUMMARY
+                      echo "查看上方日志了解具体构建状态" >> $GITHUB_STEP_SUMMARY
+                  fi
