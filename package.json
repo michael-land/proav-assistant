@@ -16,6 +16,7 @@
     "db:seed": " pnpm --filter @merchant/database exec prisma migrate seed"
   },
   "devDependencies": {
+    "@changesets/cli": "2.29.7",
     "@commitlint/cli": "20.1.0",
     "@commitlint/config-conventional": "20.0.0",
     "@biomejs/biome": "2.2.5",

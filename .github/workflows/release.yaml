@@ -4,13 +4,17 @@ on:
         branches:
             - main
         tags:
-            - "v*"
+            - "v*" # 只有打 tag 才发布
     workflow_dispatch:
         inputs:
             version:
-                description: "版本号 (默认: latest)"
-                required: false
-                default: "latest"
+                description: "版本号"
+                required: true
+            deploy:
+                description: "是否发布到 Docker Hub"
+                type: boolean
+                default: false
+
 permissions:
     contents: write
     packages: write
@@ -46,34 +50,35 @@ jobs:
         runs-on: ubuntu-latest
         outputs:
             version: ${{ steps.version.outputs.version }}
-            force-build: ${{ steps.version.outputs.force-build }}
+            should-deploy: ${{ steps.version.outputs.should-deploy }}
         steps:
-            - name: Extract version
+            - name: Extract version and deployment decision
               id: version
               run: |
+                  # 判断是否应该部署到 Docker Hub
                   if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
                       echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-                      echo "force-build=true" >> $GITHUB_OUTPUT
-                  elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-                      echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-                      echo "force-build=true" >> $GITHUB_OUTPUT
+                      echo "should-deploy=${{ github.event.inputs.deploy }}" >> $GITHUB_OUTPUT
+                      echo "📝 手动触发: version=${{ github.event.inputs.version }}, deploy=${{ github.event.inputs.deploy }}"
+                  elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+                      VERSION=${GITHUB_REF#refs/tags/v}
+                      echo "version=$VERSION" >> $GITHUB_OUTPUT
+                      echo "should-deploy=true" >> $GITHUB_OUTPUT
+                      echo "🏷️ 标签发布: v$VERSION"
                   else
-                      echo "version=latest" >> $GITHUB_OUTPUT
-                      echo "force-build=false" >> $GITHUB_OUTPUT
+                      echo "version=dev-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+                      echo "should-deploy=false" >> $GITHUB_OUTPUT
+                      echo "🔨 开发构建: 仅测试，不发布"
                   fi
 
     build-and-push:
         needs: [test, extract-version]
+        # 只有在应该部署时才运行
+        if: needs.extract-version.outputs.should-deploy == 'true'
         runs-on: ubuntu-latest
         strategy:
             matrix:
-                service:
-                    - name: api
-                      dockerfile: apps/api/Dockerfile
-                      image: xiaoyutamu/control-api
-                    - name: app
-                      dockerfile: apps/app/Dockerfile
-                      image: xiaoyutamu/control-app
+                service: [api, app]
         steps:
             - name: Checkout
               uses: actions/checkout@v5
@@ -95,42 +100,34 @@ jobs:
               run: pnpm install
 
             - name: Get last deployment tag
-              id: last-deploy
+              id: get-base
               run: |
-                  SERVICE="${{ matrix.service.name }}"
-
+                  SERVICE="${{ matrix.service }}"
 
                   LAST_TAG=$(git tag -l "deployed-${SERVICE}-*" --sort=-version:refname | head -n 1)
 
                   if [[ -z "$LAST_TAG" ]]; then
                       echo "base-ref=HEAD^" >> $GITHUB_OUTPUT
-                      echo "⚠️ 首次部署 $SERVICE, 对比上一次提交"
+                      echo "⚠️ $SERVICE: 首次部署，对比 HEAD^"
                   else
                       echo "base-ref=$LAST_TAG" >> $GITHUB_OUTPUT
-                      echo "✅ 找到上次部署标记: $LAST_TAG"
+                      echo "✅ $SERVICE: 找到上次部署 $LAST_TAG"
                   fi
 
             - name: Check changes with turbo
               id: check
               run: |
-                  if [[ "${{ needs.extract-version.outputs.force-build }}" == "true" ]]; then
-                      echo "should-build=true" >> $GITHUB_OUTPUT
-                      echo "🔨 强制构建 ${{ matrix.service.name }}"
-                      exit 0
-                  fi
+                  SERVICE="${{ matrix.service }}"
+                  BASE_REF="${{ steps.get-base.outputs.base-ref }}"
 
-                  BASE_REF="${{ steps.last-deploy.outputs.base-ref }}"
-                  SERVICE="${{ matrix.service.name }}"
-
-                  echo "🔍 使用 turbo-ignore 检查变更..."
-                  echo "   对比基准: $BASE_REF"
+                  echo "🔍 检查 $SERVICE 变更 (对比 $BASE_REF)..."
 
                   if npx turbo-ignore $SERVICE --fallback=$BASE_REF; then
                       echo "should-build=false" >> $GITHUB_OUTPUT
-                      echo "⏭️ $SERVICE 无变更, 跳过构建"
+                      echo "⏭️ $SERVICE 无变更，跳过"
                   else
                       echo "should-build=true" >> $GITHUB_OUTPUT
-                      echo "🔨 $SERVICE 有变更, 需要构建"
+                      echo "🔨 $SERVICE 有变更，构建"
                   fi
 
             - name: Set up QEMU
@@ -145,35 +142,35 @@ jobs:
               if: steps.check.outputs.should-build == 'true'
               uses: docker/login-action@v3
               with:
-                  username: ${{ vars.DOCKERHUB_USERNAME }}
-                  password: ${{ secrets.DOCKERHUB_TOKEN }}
+                  username: ${{ vars.DOCKER_USERNAME }}
+                  password: ${{ secrets.DOCKER_PASSWORD }}
 
-            - name: Build and push
+            - name: Build and push to Docker Hub
               if: steps.check.outputs.should-build == 'true'
               uses: docker/build-push-action@v5
               with:
                   context: .
-                  file: ${{ matrix.service.dockerfile }}
+                  file: apps/${{ matrix.service }}/Dockerfile
                   platforms: linux/arm64
                   push: true
                   tags: |
-                      docker.io/${{ matrix.service.image }}:${{ needs.extract-version.outputs.version }}
-                      docker.io/${{ matrix.service.image }}:latest
-                  cache-from: type=registry,ref=docker.io/${{ matrix.service.image }}:buildcache
-                  cache-to: type=registry,ref=docker.io/${{ matrix.service.image }}:buildcache,mode=max
+                      docker.io/xiaoyutamu/control-${{ matrix.service }}:${{ needs.extract-version.outputs.version }}
+                      docker.io/xiaoyutamu/control-${{ matrix.service }}:latest
+                  cache-from: type=registry,ref=docker.io/xiaoyutamu/control-${{ matrix.service }}:buildcache
+                  cache-to: type=registry,ref=docker.io/xiaoyutamu/control-${{ matrix.service }}:buildcache,mode=max
 
             - name: Tag successful deployment
               if: steps.check.outputs.should-build == 'true' && success()
               run: |
-                  SERVICE="${{ matrix.service.name }}"
+                  SERVICE="${{ matrix.service }}"
                   TAG_NAME="deployed-${SERVICE}-$(date +%Y%m%d-%H%M%S)"
 
                   git config user.name "github-actions[bot]"
                   git config user.email "github-actions[bot]@users.noreply.github.com"
-                  git tag $TAG_NAME
+                  git tag -a $TAG_NAME -m "Deployed $SERVICE v${{ needs.extract-version.outputs.version }}"
                   git push origin $TAG_NAME
 
-                  echo "✅ 创建部署标记: $TAG_NAME"
+                  echo "✅ 部署标记: $TAG_NAME"
 
     summary:
         needs: [test, extract-version, build-and-push]
@@ -182,14 +179,39 @@ jobs:
         steps:
             - name: Generate summary
               run: |
-                  echo "#
+                  echo "## 📦 构建摘要" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "**版本:** ${{ needs.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+                  echo "**版本:** \`${{ needs.extract-version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
                   echo "**Commit:** [\`${GITHUB_SHA:0:7}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
 
                   if [[ "${{ needs.test.result }}" == "failure" ]]; then
-                      echo "❌ 测试失败" >> $GITHUB_STEP_SUMMARY
-                  elif [[ "${{ needs.build-and-push.result }}" == "success" ]]; then
-                      echo "✅ 部署完成" >> $GITHUB_STEP_SUMMARY
+                      echo "❌ **测试失败**" >> $GITHUB_STEP_SUMMARY
+                      exit 1
+                  fi
+
+                  SHOULD_DEPLOY="${{ needs.extract-version.outputs.should-deploy }}"
+
+                  if [[ "$SHOULD_DEPLOY" == "true" ]]; then
+                      if [[ "${{ needs.build-and-push.result }}" == "success" ]]; then
+                          echo "### ✅ 已发布到 Docker Hub" >> $GITHUB_STEP_SUMMARY
+                          echo "" >> $GITHUB_STEP_SUMMARY
+                          echo "镜像已推送，可以拉取使用：" >> $GITHUB_STEP_SUMMARY
+                          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+                          echo "docker pull xiaoyutamu/control-api:${{ needs.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+                          echo "docker pull xiaoyutamu/control-app:${{ needs.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+                          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+                      elif [[ "${{ needs.build-and-push.result }}" == "failure" ]]; then
+                          echo "### ❌ 发布失败" >> $GITHUB_STEP_SUMMARY
+                      elif [[ "${{ needs.build-and-push.result }}" == "skipped" ]]; then
+                          echo "### ⏭️ 无变更，跳过发布" >> $GITHUB_STEP_SUMMARY
+                      fi
+                  else
+                      echo "### ✅ 测试通过" >> $GITHUB_STEP_SUMMARY
+                      echo "" >> $GITHUB_STEP_SUMMARY
+                      echo "💡 这是开发构建，未发布到 Docker Hub" >> $GITHUB_STEP_SUMMARY
+                      echo "" >> $GITHUB_STEP_SUMMARY
+                      echo "**如需发布，请：**" >> $GITHUB_STEP_SUMMARY
+                      echo "- 打标签：\`git tag v1.0.0 && git push origin v1.0.0\`" >> $GITHUB_STEP_SUMMARY
+                      echo "- 或手动触发 workflow 并勾选 \"发布到 Docker Hub\"" >> $GITHUB_STEP_SUMMARY
                   fi
