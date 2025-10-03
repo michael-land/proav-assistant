@@ -12,6 +12,11 @@ on:
                 required: false
                 default: "latest"
 
+# 添加写入权限
+permissions:
+    contents: write
+    packages: write
+
 jobs:
     test:
         runs-on: ubuntu-latest
@@ -59,8 +64,45 @@ jobs:
                       echo "force-build=false" >> $GITHUB_OUTPUT
                   fi
 
+    # 新增：获取上次部署的 commit
+    get-last-deployments:
+        runs-on: ubuntu-latest
+        outputs:
+            api-base: ${{ steps.get-base.outputs.api-base }}
+            app-base: ${{ steps.get-base.outputs.app-base }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
+
+            - name: Get last deployment commits
+              id: get-base
+              run: |
+                  echo "🔍 查找上次部署的 commit..."
+
+                  # 查找 API 的上次部署
+                  API_TAG=$(git tag -l "deployed-api-*" --sort=-version:refname | head -n 1)
+                  if [[ -z "$API_TAG" ]]; then
+                      echo "api-base=HEAD^" >> $GITHUB_OUTPUT
+                      echo "⚠️ API: 首次部署，使用 HEAD^"
+                  else
+                      echo "api-base=$API_TAG" >> $GITHUB_OUTPUT
+                      echo "✅ API: 找到上次部署 $API_TAG"
+                  fi
+
+                  # 查找 APP 的上次部署
+                  APP_TAG=$(git tag -l "deployed-app-*" --sort=-version:refname | head -n 1)
+                  if [[ -z "$APP_TAG" ]]; then
+                      echo "app-base=HEAD^" >> $GITHUB_OUTPUT
+                      echo "⚠️ APP: 首次部署，使用 HEAD^"
+                  else
+                      echo "app-base=$APP_TAG" >> $GITHUB_OUTPUT
+                      echo "✅ APP: 找到上次部署 $APP_TAG"
+                  fi
+
     build-and-push:
-        needs: [test, extract-version]
+        needs: [test, extract-version, get-last-deployments]
         runs-on: ubuntu-latest
         strategy:
             matrix:
@@ -68,9 +110,11 @@ jobs:
                     - name: api
                       dockerfile: apps/api/Dockerfile
                       image: xiaoyutamu/control-api
+                      base-ref-output: api-base
                     - name: app
                       dockerfile: apps/app/Dockerfile
                       image: xiaoyutamu/control-app
+                      base-ref-output: app-base
         steps:
             - name: Checkout
               uses: actions/checkout@v5
@@ -91,43 +135,34 @@ jobs:
             - name: Install
               run: pnpm install
 
-            - name: Get last deployment tag
-              id: last-deploy
-              run: |
-                  SERVICE="${{ matrix.service.name }}"
-
-                  # 查找最后一个该服务的部署 tag
-                  LAST_TAG=$(git tag -l "deployed-${SERVICE}-*" --sort=-version:refname | head -n 1)
-
-                  if [[ -z "$LAST_TAG" ]]; then
-                      echo "base-ref=HEAD^" >> $GITHUB_OUTPUT
-                      echo "⚠️ 首次部署 $SERVICE, 对比上一次提交"
-                  else
-                      echo "base-ref=$LAST_TAG" >> $GITHUB_OUTPUT
-                      echo "✅ 找到上次部署标记: $LAST_TAG"
-                  fi
-
             - name: Check changes with turbo
               id: check
               run: |
+                  SERVICE="${{ matrix.service.name }}"
+
+                  # 强制构建
                   if [[ "${{ needs.extract-version.outputs.force-build }}" == "true" ]]; then
                       echo "should-build=true" >> $GITHUB_OUTPUT
-                      echo "🔨 强制构建 ${{ matrix.service.name }}"
+                      echo "🔨 强制构建 $SERVICE"
                       exit 0
                   fi
 
-                  BASE_REF="${{ steps.last-deploy.outputs.base-ref }}"
-                  SERVICE="${{ matrix.service.name }}"
+                  # 从上层 job 获取对应的 base-ref
+                  if [[ "$SERVICE" == "api" ]]; then
+                      BASE_REF="${{ needs.get-last-deployments.outputs.api-base }}"
+                  else
+                      BASE_REF="${{ needs.get-last-deployments.outputs.app-base }}"
+                  fi
 
-                  echo "🔍 使用 turbo-ignore 检查变更..."
+                  echo "🔍 使用 turbo-ignore 检查 $SERVICE 变更..."
                   echo "   对比基准: $BASE_REF"
 
                   if npx turbo-ignore $SERVICE --fallback=$BASE_REF; then
                       echo "should-build=false" >> $GITHUB_OUTPUT
-                      echo "⏭️ $SERVICE 无变更, 跳过构建"
+                      echo "⏭️ $SERVICE 无变更，跳过构建"
                   else
                       echo "should-build=true" >> $GITHUB_OUTPUT
-                      echo "🔨 $SERVICE 有变更, 需要构建"
+                      echo "🔨 $SERVICE 有变更，需要构建"
                   fi
 
             - name: Set up QEMU
@@ -167,7 +202,7 @@ jobs:
 
                   git config user.name "github-actions[bot]"
                   git config user.email "github-actions[bot]@users.noreply.github.com"
-                  git tag $TAG_NAME
+                  git tag -a $TAG_NAME -m "Deployed $SERVICE at $(date)"
                   git push origin $TAG_NAME
 
                   echo "✅ 创建部署标记: $TAG_NAME"
@@ -181,12 +216,13 @@ jobs:
               run: |
                   echo "## 📦 发布摘要" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "**版本:** ${{ needs.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+                  echo "**版本:** ${{ needs.extract-version.outputs.version }}" >> $GITHUB_OUTPUT
                   echo "**Commit:** [\`${GITHUB_SHA:0:7}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
 
                   if [[ "${{ needs.test.result }}" == "failure" ]]; then
                       echo "❌ 测试失败" >> $GITHUB_STEP_SUMMARY
+                      exit 1
                   elif [[ "${{ needs.build-and-push.result }}" == "success" ]]; then
                       echo "✅ 部署完成" >> $GITHUB_STEP_SUMMARY
                   fi
