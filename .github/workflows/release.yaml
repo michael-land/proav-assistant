@@ -142,8 +142,8 @@ jobs:
               if: steps.check.outputs.should-build == 'true'
               uses: docker/login-action@v3
               with:
-                  username: ${{ vars.DOCKER_USERNAME }}
-                  password: ${{ secrets.DOCKER_PASSWORD }}
+                  username: ${{ vars.DOCKERHUB_USERNAME }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
 
             - name: Build and push to Docker Hub
               if: steps.check.outputs.should-build == 'true'
