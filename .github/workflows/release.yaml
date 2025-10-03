@@ -68,12 +68,9 @@ jobs:
                     - name: api
                       dockerfile: apps/api/Dockerfile
                       image: xiaoyutamu/control-api
-                      environment: production-api
                     - name: app
                       dockerfile: apps/app/Dockerfile
                       image: xiaoyutamu/control-app
-                      environment: production-app
-        environment: ${{ matrix.service.environment }}
         steps:
             - name: Checkout
               uses: actions/checkout@v5
@@ -94,111 +91,44 @@ jobs:
             - name: Install
               run: pnpm install
 
-            - name: Get last successful deployment commit
+            - name: Get last deployment tag
               id: last-deploy
               run: |
-                  SERVICE_NAME="${{ matrix.service.name }}"
+                  SERVICE="${{ matrix.service.name }}"
 
-                  # 使用 GitHub API 获取该环境的最后一次成功部署的 commit
-                  LAST_DEPLOYMENT=$(gh api \
-                    -H "Accept: application/vnd.github+json" \
-                    "/repos/${{ github.repository }}/deployments?environment=${{ matrix.service.environment }}&per_page=100" \
-                    --jq '[.[] | select(.statuses_url != null)] | .[0].sha' 2>/dev/null || echo "")
+                  # 查找最后一个该服务的部署 tag
+                  LAST_TAG=$(git tag -l "deployed-${SERVICE}-*" --sort=-version:refname | head -n 1)
 
-                  if [[ -z "$LAST_DEPLOYMENT" ]] || [[ "$LAST_DEPLOYMENT" == "null" ]]; then
-                      echo "base-commit=" >> $GITHUB_OUTPUT
-                      echo "has-previous=false" >> $GITHUB_OUTPUT
-                      echo "⚠️ 未找到 $SERVICE_NAME 的部署历史, turbo-ignore 将使用默认行为"
+                  if [[ -z "$LAST_TAG" ]]; then
+                      echo "base-ref=HEAD^" >> $GITHUB_OUTPUT
+                      echo "⚠️ 首次部署 $SERVICE, 对比上一次提交"
                   else
-                      # 验证 commit 是否存在于当前分支
-                      if git merge-base --is-ancestor $LAST_DEPLOYMENT HEAD 2>/dev/null; then
-                          echo "base-commit=$LAST_DEPLOYMENT" >> $GITHUB_OUTPUT
-                          echo "has-previous=true" >> $GITHUB_OUTPUT
-                          echo "✅ 找到 $SERVICE_NAME 上次成功部署: $LAST_DEPLOYMENT"
-                      else
-                          echo "base-commit=" >> $GITHUB_OUTPUT
-                          echo "has-previous=false" >> $GITHUB_OUTPUT
-                          echo "⚠️ 找到的部署 commit ($LAST_DEPLOYMENT) 不在当前分支, 使用默认行为"
-                      fi
+                      echo "base-ref=$LAST_TAG" >> $GITHUB_OUTPUT
+                      echo "✅ 找到上次部署标记: $LAST_TAG"
                   fi
-              env:
-                  GH_TOKEN: ${{ github.token }}
 
-            - name: Check changes with turbo-ignore
+            - name: Check changes with turbo
               id: check
               run: |
-                  FORCE_BUILD="${{ needs.extract-version.outputs.force-build }}"
-                  SERVICE_NAME="${{ matrix.service.name }}"
-                  BASE_COMMIT="${{ steps.last-deploy.outputs.base-commit }}"
-                  HAS_PREVIOUS="${{ steps.last-deploy.outputs.has-previous }}"
-
-                  # 强制构建
-                  if [[ "$FORCE_BUILD" == "true" ]]; then
+                  if [[ "${{ needs.extract-version.outputs.force-build }}" == "true" ]]; then
                       echo "should-build=true" >> $GITHUB_OUTPUT
-                      echo "reason=强制构建 (标签或手动触发)" >> $GITHUB_OUTPUT
-                      echo "🔨 强制构建 $SERVICE_NAME"
+                      echo "🔨 强制构建 ${{ matrix.service.name }}"
                       exit 0
                   fi
 
-                  # 使用 turbo-ignore 检查变更
-                  echo "🔍 使用 turbo-ignore 检查 $SERVICE_NAME 的变更..."
+                  BASE_REF="${{ steps.last-deploy.outputs.base-ref }}"
+                  SERVICE="${{ matrix.service.name }}"
 
-                  if [[ "$HAS_PREVIOUS" == "true" ]]; then
-                      # 有上次部署记录, 使用 fallback 参数指定对比的 commit
-                      echo "   对比基准: $BASE_COMMIT (上次成功部署)"
-                      
-                      if npx turbo-ignore $SERVICE_NAME --fallback=$BASE_COMMIT; then
-                          echo "should-build=false" >> $GITHUB_OUTPUT
-                          echo "reason=无变更 (对比 ${BASE_COMMIT:0:7})" >> $GITHUB_OUTPUT
-                          echo "⏭️ $SERVICE_NAME 自上次部署后无变更, 跳过构建"
-                      else
-                          echo "should-build=true" >> $GITHUB_OUTPUT
-                          echo "reason=检测到变更 (对比 ${BASE_COMMIT:0:7})" >> $GITHUB_OUTPUT
-                          echo "🔨 $SERVICE_NAME 检测到变更, 需要构建"
-                      fi
+                  echo "🔍 使用 turbo-ignore 检查变更..."
+                  echo "   对比基准: $BASE_REF"
+
+                  if npx turbo-ignore $SERVICE --fallback=$BASE_REF; then
+                      echo "should-build=false" >> $GITHUB_OUTPUT
+                      echo "⏭️ $SERVICE 无变更, 跳过构建"
                   else
-                      # 首次部署或找不到上次部署, 使用默认行为 (对比 HEAD^)
-                      echo "   对比基准: HEAD^ (默认行为)"
-                      
-                      if npx turbo-ignore $SERVICE_NAME; then
-                          echo "should-build=false" >> $GITHUB_OUTPUT
-                          echo "reason=无变更 (对比 HEAD^)" >> $GITHUB_OUTPUT
-                          echo "⏭️ $SERVICE_NAME 相对上次提交无变更, 跳过构建"
-                      else
-                          echo "should-build=true" >> $GITHUB_OUTPUT
-                          echo "reason=检测到变更或首次部署" >> $GITHUB_OUTPUT
-                          echo "🔨 $SERVICE_NAME 需要构建"
-                      fi
+                      echo "should-build=true" >> $GITHUB_OUTPUT
+                      echo "🔨 $SERVICE 有变更, 需要构建"
                   fi
-
-            - name: Create deployment
-              if: steps.check.outputs.should-build == 'true'
-              id: deployment
-              uses: actions/github-script@v7
-              with:
-                  script: |
-                      const deployment = await github.rest.repos.createDeployment({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        ref: context.sha,
-                        environment: '${{ matrix.service.environment }}',
-                        required_contexts: [],
-                        auto_merge: false,
-                        description: 'Deploy ${{ matrix.service.name }} v${{ needs.extract-version.outputs.version }}'
-                      });
-
-                      core.setOutput('deployment_id', deployment.data.id);
-
-                      // 立即更新为 in_progress 状态
-                      await github.rest.repos.createDeploymentStatus({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        deployment_id: deployment.data.id,
-                        state: 'in_progress',
-                        description: 'Building Docker image...'
-                      });
-
-                      return deployment.data.id;
 
             - name: Set up QEMU
               if: steps.check.outputs.should-build == 'true'
@@ -217,7 +147,6 @@ jobs:
 
             - name: Build and push
               if: steps.check.outputs.should-build == 'true'
-              id: docker-build
               uses: docker/build-push-action@v5
               with:
                   context: .
@@ -230,57 +159,18 @@ jobs:
                   cache-from: type=registry,ref=docker.io/${{ matrix.service.image }}:buildcache
                   cache-to: type=registry,ref=docker.io/${{ matrix.service.image }}:buildcache,mode=max
 
-            - name: Update deployment status (success)
+            - name: Tag successful deployment
               if: steps.check.outputs.should-build == 'true' && success()
-              uses: actions/github-script@v7
-              with:
-                  script: |
-                      await github.rest.repos.createDeploymentStatus({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        deployment_id: '${{ steps.deployment.outputs.deployment_id }}',
-                        state: 'success',
-                        environment_url: 'https://hub.docker.com/r/${{ matrix.service.image }}',
-                        log_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-                        description: 'Successfully deployed ${{ matrix.service.name }} v${{ needs.extract-version.outputs.version }}'
-                      });
-
-            - name: Update deployment status (failure)
-              if: steps.check.outputs.should-build == 'true' && failure()
-              uses: actions/github-script@v7
-              with:
-                  script: |
-                      await github.rest.repos.createDeploymentStatus({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        deployment_id: '${{ steps.deployment.outputs.deployment_id }}',
-                        state: 'failure',
-                        log_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-                        description: 'Failed to deploy ${{ matrix.service.name }}'
-                      });
-
-            - name: Summary
-              if: always()
               run: |
-                  SERVICE_NAME="${{ matrix.service.name }}"
-                  SHOULD_BUILD="${{ steps.check.outputs.should-build }}"
-                  REASON="${{ steps.check.outputs.reason }}"
+                  SERVICE="${{ matrix.service.name }}"
+                  TAG_NAME="deployed-${SERVICE}-$(date +%Y%m%d-%H%M%S)"
 
-                  echo "### $SERVICE_NAME" >> $GITHUB_STEP_SUMMARY
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git tag $TAG_NAME
+                  git push origin $TAG_NAME
 
-                  if [[ "$SHOULD_BUILD" == "true" ]]; then
-                      if [[ "${{ job.status }}" == "success" ]]; then
-                          echo "✅ **构建成功** - $REASON" >> $GITHUB_STEP_SUMMARY
-                          echo "" >> $GITHUB_STEP_SUMMARY
-                          echo "- 镜像: \`${{ matrix.service.image }}:${{ needs.extract-version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-                          echo "- [Docker Hub](https://hub.docker.com/r/${{ matrix.service.image }})" >> $GITHUB_STEP_SUMMARY
-                      else
-                          echo "❌ **构建失败** - $REASON" >> $GITHUB_STEP_SUMMARY
-                      fi
-                  else
-                      echo "⏭️ **跳过构建** - $REASON" >> $GITHUB_STEP_SUMMARY
-                  fi
-                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "✅ 创建部署标记: $TAG_NAME"
 
     summary:
         needs: [test, extract-version, build-and-push]
@@ -291,28 +181,12 @@ jobs:
               run: |
                   echo "## 📦 发布摘要" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "**版本:** \`${{ needs.extract-version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+                  echo "**版本:** ${{ needs.extract-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
                   echo "**Commit:** [\`${GITHUB_SHA:0:7}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
-                  echo "**触发方式:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
 
                   if [[ "${{ needs.test.result }}" == "failure" ]]; then
-                      echo "### ❌ 测试失败" >> $GITHUB_STEP_SUMMARY
-                      echo "" >> $GITHUB_STEP_SUMMARY
-                      echo "构建已取消" >> $GITHUB_STEP_SUMMARY
-                      exit 1
-                  fi
-
-                  if [[ "${{ needs.build-and-push.result }}" == "failure" ]]; then
-                      echo "### ⚠️ 部分服务构建失败" >> $GITHUB_STEP_SUMMARY
-                      echo "" >> $GITHUB_STEP_SUMMARY
-                      echo "查看上方详情了解失败原因" >> $GITHUB_STEP_SUMMARY
+                      echo "❌ 测试失败" >> $GITHUB_STEP_SUMMARY
                   elif [[ "${{ needs.build-and-push.result }}" == "success" ]]; then
-                      echo "### ✅ 部署完成" >> $GITHUB_STEP_SUMMARY
-                      echo "" >> $GITHUB_STEP_SUMMARY
-                      echo "🚀 查看 [Deployments](https://github.com/${{ github.repository }}/deployments) 页面了解详情" >> $GITHUB_STEP_SUMMARY
-                      echo "" >> $GITHUB_STEP_SUMMARY
-                      echo "---" >> $GITHUB_STEP_SUMMARY
-                      echo "" >> $GITHUB_STEP_SUMMARY
-                      echo "💡 **变更检测:** 使用 Turborepo 智能分析依赖关系" >> $GITHUB_STEP_SUMMARY
+                      echo "✅ 部署完成" >> $GITHUB_STEP_SUMMARY
                   fi
